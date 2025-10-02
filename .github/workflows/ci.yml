@@ -8,28 +8,150 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7
+        ports: [ "6379:6379" ]
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: labo03_db
+          MYSQL_USER: labo03
+          MYSQL_PASSWORD: labo03
+        ports: [ "3306:3306" ]
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Paquets utiles pour les tests/DB
+          pip install pytest SQLAlchemy redis mysql-connector-python python-dotenv
 
-      - name: Creer fichier .env
+      - name: Install wait tools (nc + mysql client)
         run: |
-          echo "DB_HOST=127.0.0.1" >> .env
-          echo "DB_PORT=3306" >> .env
-          echo "DB_NAME=labo03_db" >> .env
-          echo "DB_USER=labo03" >> .env
-          echo "DB_PASS=labo03" >> .env
-          echo "REDIS_HOST=127.0.0.1" >> .env
-          echo "REDIS_PORT=6379" >> .env
-          echo "REDIS_DB=0" >> .env
+          sudo apt-get update
+          sudo apt-get install -y netcat-openbsd mysql-client
+
+      - name: Wait for services (quick)
+        run: |
+          for i in {1..90}; do nc -z 127.0.0.1 6379 && echo "Redis up" && break; sleep 1; done
+          for i in {1..90}; do nc -z 127.0.0.1 3306 && echo "MySQL up" && break; sleep 1; done
+
+      - name: "Seed DB (labo03: users/products/stocks + data)"
+        run: |
+          mysql -h 127.0.0.1 -uroot -proot <<'SQL'
+          CREATE DATABASE IF NOT EXISTS labo03_db CHARACTER SET utf8mb4;
+          CREATE USER IF NOT EXISTS 'labo03'@'%' IDENTIFIED BY 'labo03';
+          GRANT ALL PRIVILEGES ON labo03_db.* TO 'labo03'@'%';
+          FLUSH PRIVILEGES;
+          USE labo03_db;
+
+          CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            email VARCHAR(150) NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS products (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(150) NOT NULL,
+            sku  VARCHAR(100) NOT NULL,
+            price DECIMAL(10,2) NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS stocks (
+            product_id INT PRIMARY KEY,
+            quantity   INT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS orders (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            total_amount DECIMAL(10,2) NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS order_items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            order_id INT NOT NULL,
+            product_id INT NOT NULL,
+            quantity INT NOT NULL,
+            unit_price DECIMAL(10,2) NOT NULL
+          );
+
+          INSERT INTO users (id, name, email) VALUES
+            (1,'Jane Doe','jd@example.ca')
+          ON DUPLICATE KEY UPDATE name=VALUES(name), email=VALUES(email);
+
+          INSERT INTO products (id, name, sku, price) VALUES
+            (1,'Product 1','SKU-0001',9.99),
+            (2,'Product 2','SKU-0002',15.50)
+          ON DUPLICATE KEY UPDATE name=VALUES(name), sku=VALUES(sku), price=VALUES(price);
+
+          INSERT INTO stocks (product_id, quantity) VALUES
+            (1,1000),
+            (2,500)
+          ON DUPLICATE KEY UPDATE quantity=VALUES(quantity);
+          SQL
+
+      - name: Create .env for tests
+        run: |
+          {
+            echo "DB_HOST=127.0.0.1"
+            echo "DB_PORT=3306"
+            echo "DB_NAME=labo03_db"
+            echo "DB_USER=labo03"
+            echo "DB_PASS=labo03"
+            echo "REDIS_HOST=127.0.0.1"
+            echo "REDIS_PORT=6379"
+            echo "REDIS_DB=0"
+          } >> .env
 
       - name: Run tests
         working-directory: src
-        run: echo "Call pytest command here!"
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: "3306"
+          DB_NAME: labo03_db
+          DB_USER: labo03
+          DB_PASS: labo03
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          REDIS_DB: "0"
+        run: |
+          python -m pytest -q
+
+  deploy:
+    runs-on: self-hosted
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: Ensure Docker network exists (external)
+        run: |
+          docker network create labo03-network || true
+
+      - name: Build & deploy stack
+        run: |
+          docker compose down --remove-orphans || true
+          docker compose up -d --build --remove-orphans

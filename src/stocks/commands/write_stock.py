@@ -6,6 +6,7 @@ Auteurs : Gabriel C. Ullmann, Fabio Petrillo, 2025
 from sqlalchemy import text
 from stocks.models.stock import Stock
 from db import get_redis_conn, get_sqlalchemy_session
+from stocks.models.product import Product as ProductModel
 
 def set_stock_for_product(product_id, quantity):
     """Set stock quantity for product in MySQL"""
@@ -26,9 +27,24 @@ def set_stock_for_product(product_id, quantity):
             session.flush() 
             session.commit()
             response_message = f"rows added: {new_stock.product_id}"
-  
+        # 🔽🔽🔽 AJOUT : écrire name/sku/price en plus de quantity dans Redis
+        # lire les infos produit depuis MySQL
+        prod = session.query(ProductModel).filter(ProductModel.id == product_id).first()
+        name  = prod.name if prod else f"Product {product_id}"
+        sku   = prod.sku if prod else ""
+        price = float(prod.price) if (prod and prod.price is not None) else 0.0
+
         r = get_redis_conn()
-        r.hset(f"stock:{product_id}", "quantity", quantity)
+        r.hset(
+            f"stock:{product_id}",
+            mapping={
+                "quantity": int(quantity),
+                "name": name,
+                "sku": sku,
+                "price": price,
+            },
+        )
+        # 🔼🔼🔼 FIN AJOUT
         return response_message
     except Exception as e:
         session.rollback()
@@ -73,6 +89,7 @@ def update_stock_redis(order_items, operation):
     stock_keys = list(r.scan_iter("stock:*"))
     if stock_keys:
         pipeline = r.pipeline()
+        session = get_sqlalchemy_session()
         for item in order_items:
             if hasattr(item, 'product_id'):
                 product_id = item.product_id
@@ -88,9 +105,21 @@ def update_stock_redis(order_items, operation):
                 new_quantity = current_stock + quantity
             else:  
                 new_quantity = current_stock - quantity
+
+            prod = session.query(ProductModel).filter(ProductModel.id == product_id).first()
+            name  = prod.name if prod else f"Product {product_id}"
+            sku   = prod.sku if prod else ""
+            price = float(prod.price) if (prod and prod.price is not None) else 0.0
             
-            pipeline.hset(f"stock:{product_id}", "quantity", new_quantity)
-        
+            pipeline.hset(
+                f"stock:{product_id}",
+                mapping={
+                    "quantity": new_quantity,
+                    "name": name,
+                    "sku": sku,
+                    "price": price,
+                },
+            )        
         pipeline.execute()
     
     else:

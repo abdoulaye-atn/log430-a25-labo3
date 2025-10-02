@@ -1,10 +1,16 @@
+# scripts/docker-compose.yml
 services:
   supplier_app:
-    build: .
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - .:/app          # Monte le dossier scripts/ dans /app
+    command: >
+      sh -c "pip install --no-cache-dir requests && python /app/supplier_app.py"
     environment:
       - PYTHONUNBUFFERED=1
-    volumes:
-      - .:/app
+      # Si tu veux passer l'URL via variable d'env, ajoute une ligne du genre :
+      # - SUPPLIER_ENDPOINT_URL=http://host.docker.internal:5000/stocks/graphql-query
     networks:
       - labo03-network
 
